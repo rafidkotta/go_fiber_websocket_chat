@@ -17,12 +17,10 @@ func main() {
 		return c.Status(403).SendString("Request origin not allowed")
 	})
 
-	// Create test routes
-	routes.TestRoutes(app)
 	// Create chat routes
 	routes.ChatRoutes(app)
 
 	// ws://localhost:3000/ws
 	log.Fatal(app.Listen(":3000"))
-	
+
 }
