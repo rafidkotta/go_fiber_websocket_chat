@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"log"
 	"strings"
+	"time"
 )
 
 type client struct {
@@ -15,15 +16,25 @@ type client struct {
 	userID     string
 } // Add more data To this type if needed
 
-type Message struct {
+type Chat struct {
 	Message string `json:"message"`
 	From    string `json:"from"`
 	To      string `json:"to"`
+	Type    string `json:"type"`
+	Time    string `json:"time"`
 }
 
-type SocketEvent struct {
+type Message struct {
 	Event   string      `json:"event"`
 	Payload interface{} `json:"payload"`
+}
+
+type RoomList struct {
+	Rooms []string `json:"rooms"`
+}
+
+type Alert struct {
+	Message string `json:"message"`
 }
 
 type Group struct {
@@ -40,7 +51,7 @@ type joinGroupRequest struct {
 var clients = make(map[client]client) // Note: although large maps with pointer-like types (e.g. strings) as keys are slow, using pointers themselves as keys is acceptable and fast
 var groups = make(map[string]Group)
 var register = make(chan client)
-var broadcast = make(chan Message)
+var broadcast = make(chan Chat)
 var unregister = make(chan client)
 var createGroup = make(chan Group)
 var joinGroup = make(chan joinGroupRequest)
@@ -71,24 +82,24 @@ func ChatRoutes(app *fiber.App) {
 			}
 			log.Println("msg : ", string(message), err)
 			if messageType == websocket.TextMessage {
-				socketEvent := SocketEvent{}
+				socketEvent := Message{}
 				err = json.Unmarshal(message, &socketEvent)
 				if err != nil {
 					log.Println("json error : #message , error:", err)
 				}
-				// Broadcast the received Message
+				// Broadcast the received Chat
 				handleSocketEvents(client, socketEvent)
 			} else {
-				log.Println("websocket Message received of type", messageType)
+				log.Println("websocket Chat received of type", messageType)
 			}
 		}
 	}))
 }
 
-func handleSocketEvents(client client, socketEvent SocketEvent) {
+func handleSocketEvents(client client, socketEvent Message) {
 	switch socketEvent.Event {
 	case "message":
-		message := Message{}
+		message := Chat{}
 		b, err := json.Marshal(socketEvent.Payload)
 		if err != nil {
 			log.Println("json encode error:", err)
@@ -97,7 +108,9 @@ func handleSocketEvents(client client, socketEvent SocketEvent) {
 		if err != nil {
 			log.Println("json decode error:", err)
 		}
-		message.From = client.username
+		message.Time = time.Now().Format(time.RFC3339)
+		message.Type = "text"
+		message.From = "user/" + client.username
 		broadcast <- message
 	case "create_group":
 		group := Group{}
@@ -178,13 +191,14 @@ func runHub() {
 		case connection := <-register:
 			clients[connection] = client{}
 			log.Println("connection registered")
+			sendMessageToUser(connection, getGroupsMessage())
 
 		case message := <-broadcast:
-			log.Println("Message received:", message)
+			log.Println("Chat received:", message)
 
 			_, receivers := getReceivers(message.To)
-			// Send the Message To all clients
-			sendMessage(receivers, message)
+			// Send the Chat To all clients
+			sendChat(receivers, message)
 
 		case connection := <-unregister:
 			// Remove the client from the hub
@@ -196,37 +210,37 @@ func runHub() {
 			// Create group
 			oldGroup := getGroup(group.Name)
 			if oldGroup != nil {
-				message := Message{
+				message := Chat{
 					Message: "group already exists",
 					From:    "server",
 					To:      "user/" + group.Participants[0],
+					Type:    "text",
+					Time:    time.Now().Format(time.RFC3339),
 				}
 				_, receivers := getReceivers(message.To)
-				sendMessage(receivers, message)
+				sendChat(receivers, message)
 				log.Println("group already exists", groups)
 				return
 			}
 			groups[group.Name] = group
-			message := Message{
+			message := Chat{
 				Message: "Group created",
 				From:    "server",
 				To:      "user/" + group.Participants[0],
+				Type:    "text",
+				Time:    time.Now().Format(time.RFC3339),
 			}
 			_, receivers := getReceivers(message.To)
-			sendMessage(receivers, message)
+			sendChat(receivers, message)
 			log.Println("group created", groups)
 
 		case join := <-joinGroup:
 			// Join group
-			message := joinAGroup(join)
-			_, receivers := getReceivers(message.To)
-			sendMessage(receivers, message)
+			joinAGroup(join)
 
 		case leave := <-leaveGroup:
 			// Leave group
-			message := leaveAGroup(leave)
-			_, receivers := getReceivers(message.To)
-			sendMessage(receivers, message)
+			leaveAGroup(leave)
 		}
 	}
 }
@@ -279,29 +293,33 @@ func getClient(username string) *client {
 	return nil
 }
 
-func leaveAGroup(join joinGroupRequest) Message {
+func leaveAGroup(join joinGroupRequest) {
 	group := getGroup(join.GroupId)
 	if group == nil {
-		return Message{
-			Message: "No group found to leave",
-			From:    "server",
-			To:      "user/" + join.Client.username,
-		}
+		sendMessageToUser(join.Client, Message{
+			Event:   "alert",
+			Payload: Alert{Message: "No group found to leave"},
+		})
+		return
 	}
 	if !checkIsParticipant(*group, join.Client) {
-		return Message{
-			Message: "Not a member of group",
-			From:    "server",
-			To:      "user/" + join.Client.username,
-		}
+		sendMessageToUser(join.Client, Message{
+			Event:   "alert",
+			Payload: Alert{Message: "Not a member of group"},
+		})
+		return
 	}
 	group.Participants = RemoveParticipant(group.Participants, join.Client.username)
 	groups[join.GroupId] = *group
-	return Message{
+	chat := Chat{
 		Message: join.Client.username + " left group",
 		From:    join.Client.username,
 		To:      "/group/" + group.Name,
+		Type:    "text",
+		Time:    time.Now().Format(time.RFC3339),
 	}
+	_, receivers := getReceivers(chat.To)
+	sendChat(receivers, chat)
 }
 
 func findPosition(users []string, user string) int {
@@ -324,41 +342,68 @@ func RemoveParticipant(participants []string, user string) []string {
 	}
 }
 
-func joinAGroup(join joinGroupRequest) Message {
+func joinAGroup(join joinGroupRequest) {
 	group := getGroup(join.GroupId)
 	if group == nil {
-		return Message{
-			Message: "No group found to join",
-			From:    "server",
-			To:      "user/" + join.Client.username,
-		}
+		sendMessageToUser(join.Client, Message{
+			Event:   "alert",
+			Payload: Alert{Message: "No group found to join"},
+		})
+		return
 	}
 	if checkIsParticipant(*group, join.Client) {
-		return Message{
-			Message: "Already a member of group",
-			From:    "server",
-			To:      "user/" + join.Client.username,
-		}
+		sendMessageToUser(join.Client, Message{
+			Event:   "alert",
+			Payload: Alert{Message: "Already a member of group"},
+		})
+		return
 	}
 	group.Participants = append(group.Participants, join.Client.username)
 	groups[group.Name] = *group
-	return Message{
+	chat := Chat{
 		Message: join.Client.username + " joined this group",
 		From:    join.Client.username,
 		To:      "/group/" + group.Name,
+		Type:    "text",
+		Time:    time.Now().Format(time.RFC3339),
+	}
+	_, receivers := getReceivers(chat.To)
+	sendChat(receivers, chat)
+}
+
+func sendChat(receivers []client, message Chat) {
+	for _, receiver := range receivers {
+		if receiver.username != message.From {
+			sendMessageToUser(receiver, Message{
+				Event:   "chat",
+				Payload: message,
+			})
+		}
 	}
 }
 
-func sendMessage(receivers []client, message Message) {
-	for _, receiver := range receivers {
-		if receiver.username != message.From {
-			if err := receiver.connection.WriteMessage(websocket.TextMessage, []byte(message.Message)); err != nil {
-				log.Println("write error:", err)
-				receiver.connection.WriteMessage(websocket.CloseMessage, []byte{})
-				receiver.connection.Close()
-				delete(clients, receiver)
-			}
-		}
+func sendMessageToUser(receiver client, message Message) {
+	b, err := json.Marshal(message)
+	if err != nil {
+		log.Println("json encode error:", err)
+	}
+	if err := receiver.connection.WriteMessage(websocket.TextMessage, b); err != nil {
+		log.Println("write error:", err)
+		receiver.connection.WriteMessage(websocket.CloseMessage, []byte{})
+		receiver.connection.Close()
+		delete(clients, receiver)
+	}
+}
+
+func getGroupsMessage() Message {
+	var groupsList []string
+	for _, group := range groups {
+		groupsList = append(groupsList, group.Name)
+	}
+	roomList := RoomList{Rooms: groupsList}
+	return Message{
+		Event:   "rooms",
+		Payload: roomList,
 	}
 }
 
