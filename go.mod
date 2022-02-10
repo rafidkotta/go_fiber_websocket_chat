@@ -1,4 +1,4 @@
-module github.com/rafidkotta/go_websocket_chat
+module github.com/rafidkotta/go_fiber_websocket_chat
 
 go 1.16
 

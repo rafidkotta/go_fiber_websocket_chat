@@ -2,8 +2,8 @@ package main
 
 import (
 	"github.com/gofiber/fiber/v2"
-	"github.com/rafidkotta/go_websocket_chat/config"
-	"github.com/rafidkotta/go_websocket_chat/routes"
+	"github.com/rafidkotta/go_fiber_websocket_chat/config"
+	"github.com/rafidkotta/go_fiber_websocket_chat/routes"
 	"log"
 )
 
