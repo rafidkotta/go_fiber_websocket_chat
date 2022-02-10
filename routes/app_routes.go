@@ -33,6 +33,21 @@ type RoomList struct {
 	Rooms []string `json:"rooms"`
 }
 
+type WelcomeMessage struct {
+	Rooms  []GroupInfo `json:"groups"`
+	People []People    `json:"people"`
+}
+
+type People struct {
+	Id       string `json:"id"`
+	Username string `json:"username"`
+}
+
+type GroupInfo struct {
+	Name string `json:"name"`
+	Id   string `json:"id"`
+}
+
 type Alert struct {
 	Message string `json:"message"`
 }
@@ -190,12 +205,9 @@ func runHub() {
 		select {
 		case connection := <-register:
 			clients[connection] = client{}
-			log.Println("connection registered")
-			sendMessageToUser(connection, getGroupsMessage())
+			sendMessageToUser(connection, welcomeMessage(connection))
 
 		case message := <-broadcast:
-			log.Println("Chat received:", message)
-
 			_, receivers := getReceivers(message.To)
 			// Send the Chat To all clients
 			sendChat(receivers, message)
@@ -203,8 +215,6 @@ func runHub() {
 		case connection := <-unregister:
 			// Remove the client from the hub
 			delete(clients, connection)
-
-			log.Println("connection unregistered")
 
 		case group := <-createGroup:
 			// Create group
@@ -219,7 +229,6 @@ func runHub() {
 				}
 				_, receivers := getReceivers(message.To)
 				sendChat(receivers, message)
-				log.Println("group already exists", groups)
 				return
 			}
 			groups[group.Name] = group
@@ -232,7 +241,6 @@ func runHub() {
 			}
 			_, receivers := getReceivers(message.To)
 			sendChat(receivers, message)
-			log.Println("group created", groups)
 
 		case join := <-joinGroup:
 			// Join group
@@ -395,15 +403,38 @@ func sendMessageToUser(receiver client, message Message) {
 	}
 }
 
-func getGroupsMessage() Message {
-	var groupsList []string
+func groupsList() []GroupInfo {
+	var groupsList []GroupInfo
 	for _, group := range groups {
-		groupsList = append(groupsList, group.Name)
+		groupsList = append(groupsList, GroupInfo{
+			Name: group.Name,
+			Id:   group.Id,
+		})
 	}
-	roomList := RoomList{Rooms: groupsList}
+	return groupsList
+}
+
+func getUsers(current client) []People {
+	var people []People
+	for i := range clients {
+		if i.username != current.username {
+			people = append(people, People{
+				Id:       i.userID,
+				Username: i.username,
+			})
+		}
+	}
+	return people
+}
+
+func welcomeMessage(user client) Message {
+	welcome := WelcomeMessage{
+		Rooms:  groupsList(),
+		People: getUsers(user),
+	}
 	return Message{
-		Event:   "rooms",
-		Payload: roomList,
+		Event:   "welcome",
+		Payload: welcome,
 	}
 }
 
